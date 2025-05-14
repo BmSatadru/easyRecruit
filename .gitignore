@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store 
+*.pdf
+flow.md
+venv/
+.cursor
+src/__pycache__/
