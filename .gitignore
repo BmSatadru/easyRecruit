@@ -7,3 +7,6 @@ flow.md
 venv/
 .cursor
 src/__pycache__/
+steps.md
+jdDataFlow.md
+uploads/

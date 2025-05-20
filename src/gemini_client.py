@@ -3,105 +3,42 @@ import google.generativeai as genai
 import os
 import re
 from dotenv import load_dotenv
-from .llm_client import LLMClient
-from time import sleep
+import logging
+import time
+from functools import wraps
 
-class GeminiLLMClient(LLMClient):
-    _instance = None
-    _is_initialized = False
-    model_name = None  # Class variable to store the model name
-    MAX_RETRIES = 3
-    RETRY_DELAY = 30  # seconds
+logger = logging.getLogger(__name__)
+
+def rate_limit_decorator(max_retries=3, retry_delay=15):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if "quota" in str(e).lower():
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Rate limit hit. Waiting {retry_delay} seconds. Attempt {attempt + 1}/{max_retries}")
+                            time.sleep(retry_delay)
+                            continue
+                    raise
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+class GeminiLLMClient:
+    """Client for handling JD data extraction using Google's Gemini API."""
     
-    # Track quota exceeded models to avoid retrying them
-    _quota_exceeded_models = set()
-
-    def __new__(cls):
-        if cls._instance is None:
-            # Verify configuration before creating instance
-            cls.verify_api_configuration()
-            cls._instance = super(GeminiLLMClient, cls).__new__(cls)
-        return cls._instance
-
     def __init__(self):
-        """Initialize the Gemini client only once."""
-        if not self._is_initialized:
-            self._initialize_client()
-            GeminiLLMClient._is_initialized = True
+        """Initialize the Gemini client."""
+        self.verify_api_configuration()
+        self._initialize_client()
 
     @staticmethod
-    def _extract_retry_delay(error_message):
-        """Extract retry delay from error message."""
-        match = re.search(r'retry_delay\s*{\s*seconds:\s*(\d+)\s*}', error_message)
-        if match:
-            return int(match.group(1))
-        return 30  # default delay
-
-    @classmethod
-    def _handle_rate_limit_error(cls, error_message, current_model=None):
-        """Handle rate limit errors with appropriate messages and model fallback."""
-        if "429" in error_message:
-            if "exceeded your current quota" in error_message:
-                if current_model:
-                    cls._quota_exceeded_models.add(current_model)
-                    # Try to verify configuration again with remaining models
-                    try:
-                        print(f"Quota exceeded for {current_model}, attempting to switch models...")
-                        cls.verify_api_configuration(exclude_models=cls._quota_exceeded_models)
-                        return None  # Indicate successful fallback
-                    except Exception as e:
-                        if len(cls._quota_exceeded_models) == len(cls.get_model_candidates()):
-                            # All models have exceeded quota
-                            raise RuntimeError(
-                                "⚠️ API Quota Exceeded for all available models\n\n"
-                                "The free tier quota for all Gemini models has been exceeded. To resolve this:\n"
-                                "1. Wait for the quota to reset (usually within an hour)\n"
-                                "2. Consider upgrading to a paid tier\n"
-                                "3. Check your usage at: https://ai.google.dev/pricing\n\n"
-                                "For more information on quotas and limits, visit:\n"
-                                "https://ai.google.dev/gemini-api/docs/rate-limits"
-                            )
-                        else:
-                            raise e
-            elif "rate limit" in error_message.lower():
-                retry_delay = cls._extract_retry_delay(error_message)
-                raise RuntimeError(
-                    f"⚠️ Rate Limit Reached\n\n"
-                    f"Please wait {retry_delay} seconds before trying again.\n"
-                    "The API has temporary rate limits to ensure fair usage."
-                )
-        return error_message
-
-    @staticmethod
-    def get_model_candidates():
-        """Get list of model candidates in order of preference."""
-        return [
-            "models/gemini-1.5-pro-latest",     # Latest 1.5 Pro
-            "models/gemini-1.5-pro",            # Generic 1.5 Pro
-            "models/gemini-2.5-flash-preview-04-17",  # Latest Flash Preview - faster, lower quota usage
-            "models/gemini-2.0-flash",          # Stable Flash model
-            "models/gemini-1.5-flash",          # 1.5 Flash model
-            "models/gemini-2.0-flash-lite",     # Lightweight Flash model
-            "models/gemini-1.5-flash-8b",       # 8B Flash model - for high volume tasks
-            "models/gemini-1.5-pro-002",        # Specific 1.5 Pro version
-            "models/gemini-1.5-pro-001",        # Specific 1.5 Pro version
-            "models/gemini-pro",                # Legacy name
-            "models/gemini-2.0-pro-exp"         # Experimental 2.0
-        ]
-
-    @classmethod
-    def verify_api_configuration(cls, exclude_models=None):
-        """
-        Verify API configuration and model availability.
-        Raises exception if configuration is invalid.
-        
-        Args:
-            exclude_models: Set of models to exclude from consideration (e.g., due to quota limits)
-        """
-        # Load environment variables
+    def verify_api_configuration():
+        """Verify and set up API configuration."""
         load_dotenv()
-
-        # Check API key
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError(
@@ -111,134 +48,185 @@ class GeminiLLMClient(LLMClient):
                 "2. Create a .env file in your project root\n"
                 "3. Add the line: GEMINI_API_KEY=your_api_key_here"
             )
-
-        # Configure Gemini API
+        
         genai.configure(api_key=api_key)
-        
-        # Get available models
-        try:
-            available_models = [m.name for m in genai.list_models()]
-        except Exception as e:
-            print(f"Warning: Could not fetch available models: {str(e)}")
-            available_models = [f"models/{m}" for m in cls.get_model_candidates()]
-
-        # Initialize exclude_models if None
-        exclude_models = exclude_models or set()
-        
-        # Try each model in order until one works
-        last_error = None
-        model_candidates = [m for m in cls.get_model_candidates() if m not in exclude_models]
-        
-        if not model_candidates:
-            raise RuntimeError(
-                "⚠️ API Quota Exceeded for all available models\n\n"
-                "The free tier quota for all Gemini models has been exceeded. To resolve this:\n"
-                "1. Wait for the quota to reset (usually within an hour)\n"
-                "2. Consider upgrading to a paid tier\n"
-                "3. Check your usage at: https://ai.google.dev/pricing\n\n"
-                "For more information on quotas and limits, visit:\n"
-                "https://ai.google.dev/gemini-api/docs/rate-limits"
-            )
-
-        for model_name in model_candidates:
-            if model_name not in available_models:
-                print(f"Warning: Model {model_name} not available, skipping...")
-                continue
-
-            try:
-                # Store the selected model name as a class variable
-                cls.model_name = model_name.replace('models/', '')  # Remove 'models/' prefix
-                
-                # Test model access with minimal content
-                model = genai.GenerativeModel(cls.model_name)
-                test_response = model.generate_content("Test")
-                if not test_response:
-                    raise ValueError("Failed to generate test content")
-                
-                print(f"✅ Gemini API configuration verified successfully using model: {cls.model_name}")
-                return True
-                
-            except Exception as e:
-                error_message = str(e)
-                try:
-                    # Handle rate limit errors
-                    if "429" in error_message and "quota" in error_message.lower():
-                        print(f"Quota exceeded for {model_name}, attempting to switch models...")
-                        exclude_models.add(model_name)
-                        last_error = e
-                        continue
-                    elif "rate limit" in error_message.lower():
-                        retry_delay = cls._extract_retry_delay(error_message)
-                        print(f"Rate limit reached. Waiting {retry_delay} seconds before retry...")
-                        sleep(retry_delay)
-                        # Retry the same model after delay
-                        continue
-                    else:
-                        last_error = e
-                        print(f"Error with model {model_name}: {error_message}")
-                        continue
-                except Exception as handle_error:
-                    last_error = handle_error
-                    continue
-
-        # If we've exhausted all models, raise the last error
-        cls.model_name = None  # Reset model name on failure
-        if last_error:
-            raise RuntimeError(f"Failed to configure Gemini API with any available model: {str(last_error)}")
 
     def _initialize_client(self):
-        """Initialize the client with the verified configuration."""
-        try:
-            if not self.__class__.model_name:
-                raise ValueError("Model name not set. Please verify API configuration first.")
-            
-            self.model = genai.GenerativeModel(self.__class__.model_name)
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Gemini client: {str(e)}")
-
-    def _handle_api_call(self, prompt: str) -> str:
-        """Helper method to handle API calls with proper error handling."""
-        retries = 0
-        while retries < self.MAX_RETRIES:
+        """Initialize the Gemini model with fallbacks."""
+        logger.info("Initializing Gemini model")
+        
+        # Updated model names to match the latest Gemini API versions
+        models = [
+            'gemini-2.0-flash',  # Latest Flash model
+            'gemini-2.0-flash-001',  # Stable Flash model
+            'gemini-2.0-flash-lite',  # Lightweight Flash model
+            'gemini-1.5-pro-001',  # Fallback Pro model
+            'gemini-1.5-pro'  # Last resort fallback
+        ]
+        
+        last_error = None
+        for model_name in models:
             try:
-                response = self.model.generate_content(prompt)
-                if not response or not response.text:
-                    raise ValueError("Empty response from API")
-                return response.text.strip()
+                logger.info(f"Attempting to initialize model: {model_name}")
+                self.model = genai.GenerativeModel(model_name)
+                
+                # Test the model with a minimal prompt to verify connectivity
+                test_response = self.model.generate_content("Test.")
+                if test_response and hasattr(test_response, 'text'):
+                    logger.info(f"Successfully initialized model: {model_name}")
+                    return
+                
             except Exception as e:
-                error_msg = str(e)
-                print(f"Error in API call: {error_msg}")
-                
-                try:
-                    # Handle rate limit errors
-                    error_msg = self._handle_rate_limit_error(error_msg)
-                except RuntimeError as rate_error:
-                    # If it's a quota error, raise it immediately
-                    if "quota" in str(rate_error):
-                        return f"Error: {str(rate_error)}"
-                    # For rate limits, wait and retry
-                    retry_delay = self._extract_retry_delay(str(e))
-                    print(f"Rate limit reached. Waiting {retry_delay} seconds before retry...")
-                    sleep(retry_delay)
-                    retries += 1
-                    continue
-                
-                # For model-specific errors, try to reinitialize
-                if "model" in error_msg.lower():
-                    try:
-                        print("Attempting to reinitialize with verified model...")
-                        self.__class__.verify_api_configuration()
-                        self._initialize_client()
-                        continue
-                    except Exception as reinit_error:
-                        print(f"Reinitialization failed: {str(reinit_error)}")
-                
-                retries += 1
-                if retries < self.MAX_RETRIES:
-                    print(f"Retrying API call... (Attempt {retries + 1}/{self.MAX_RETRIES})")
-                    sleep(self.RETRY_DELAY)
+                last_error = str(e)
+                if "quota" in last_error.lower():
+                    logger.warning(f"Rate limit hit for {model_name}. Waiting 60 seconds before trying next model...")
+                    time.sleep(60)  # Wait before trying next model
+                elif "not found" in last_error.lower():
+                    logger.warning(f"Model {model_name} not available: {last_error}")
+                else:
+                    logger.warning(f"Failed to initialize {model_name}: {last_error}")
+                continue
+        
+        error_msg = (
+            "Failed to initialize any Gemini model. "
+            "Please check:\n"
+            "1. Your API key is valid and has sufficient quota\n"
+            "2. You have network connectivity\n"
+            "3. The API service is available\n\n"
+            f"Last error: {last_error}"
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    @rate_limit_decorator(max_retries=3, retry_delay=15)
+    def _handle_api_call(self, prompt: str) -> str:
+        """Handle API calls with error handling and retries."""
+        logger.info("\n" + "*"*50)
+        logger.info("GEMINI CLIENT PROCESSING STARTED")
+        logger.info("*"*50)
+        
+        try:
+            logger.info("\nReceived Prompt:")
+            logger.info("-"*30)
+            logger.info(prompt[:500] + "..." if len(prompt) > 500 else prompt)
             
-        return "Error: Failed to generate response after multiple attempts"
+            # Add safety check for model initialization
+            if not hasattr(self, 'model'):
+                logger.info("\nInitializing model...")
+                self._initialize_client()
+            
+            logger.info("\nMaking API call...")
+            response = self.model.generate_content(prompt)
+            
+            if not response or not response.text:
+                logger.error("\nEmpty response from Gemini API")
+                raise ValueError("Empty response from API")
+                
+            logger.info("\nAPI Response Received:")
+            logger.info("-"*30)
+            logger.info(response.text[:500] + "..." if len(response.text) > 500 else response.text)
+            
+            # Try to parse as JSON to verify structure
+            try:
+                json_response = json.loads(response.text)
+                logger.info("\nValid JSON structure verified")
+                logger.info("-"*30)
+                logger.info(json.dumps(json_response, indent=2))
+            except json.JSONDecodeError:
+                logger.warning("\nResponse is not JSON format")
+            
+            logger.info("\n" + "*"*50)
+            logger.info("GEMINI CLIENT PROCESSING COMPLETED")
+            logger.info("*"*50 + "\n")
+            
+            return response.text.strip()
+            
+        except Exception as e:
+            logger.error(f"\nGemini API call error: {str(e)}")
+            # Return a structured error response
+            error_response = json.dumps({
+                "core_metadata": {
+                    "company": "Not specified",
+                    "job_title": "Not specified",
+                    "location": "Not specified",
+                    "employment_type": "Not specified"
+                },
+                "error": str(e)
+            })
+            logger.info("\nReturning error response:")
+            logger.info("-"*30)
+            logger.info(error_response)
+            return error_response
+
+    def process_jd_content(self, text: str) -> dict:
+        """Process job description content and extract structured information.
+        
+        Args:
+            text: The job description text to analyze
+            
+        Returns:
+            Dict containing structured JD information
+        """
+        prompt = """
+Extract key information from this job description and return it in valid JSON format:
+{
+    "core_metadata": {
+        "company": "string",
+        "job_title": "string",
+        "location": "string",
+        "employment_type": "string"
+    },
+    "requirements": {
+        "skills": {
+            "technical": ["list of technical skills"],
+            "soft": ["list of soft skills"]
+        },
+        "experience": "string",
+        "education": "string"
+    },
+    "job_details": {
+        "responsibilities": ["list of responsibilities"],
+        "team_structure": "string",
+        "growth_opportunities": "string"
+    },
+    "additional_info": {
+        "industry": "string",
+        "seniority_level": "string",
+        "travel_requirements": "string",
+        "remote_policy": "string"
+    }
+}
+
+Job Description:
+{text}
+
+Important: Ensure the response is a valid JSON object with all the fields shown above. Use null for missing values.
+"""
+        try:
+            response = self._handle_api_call(prompt)
+            parsed_data = json.loads(response)
+            
+            # Add default core_metadata if missing
+            if 'core_metadata' not in parsed_data:
+                parsed_data['core_metadata'] = {
+                    "company": "Not specified",
+                    "job_title": "Not specified",
+                    "location": "Not specified",
+                    "employment_type": "Not specified"
+                }
+            
+            return parsed_data
+        except Exception as e:
+            logger.error(f"Error in process_jd_content: {str(e)}")
+            return {
+                "core_metadata": {
+                    "company": "Not specified",
+                    "job_title": "Not specified",
+                    "location": "Not specified",
+                    "employment_type": "Not specified"
+                },
+                "error": str(e)
+            }
 
     def format_content(self, text: str) -> dict:
         """Format and structure the content of a resume or job description."""

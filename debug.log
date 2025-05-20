@@ -1,0 +1,9 @@
+2025-05-15 12:29:22,460 - __main__ - INFO - Verifying Gemini API configuration...
+2025-05-15 12:29:30,272 - __main__ - INFO - Gemini API configuration verified successfully
+2025-05-15 12:29:42,261 - __main__ - INFO - Verifying Gemini API configuration...
+2025-05-15 12:29:50,866 - __main__ - INFO - Gemini API configuration verified successfully
+2025-05-15 12:29:50,877 - __main__ - INFO - Starting JD processing
+2025-05-15 12:29:50,877 - __main__ - INFO - Processing JD file: JD Growth Manager DC.pdf
+2025-05-15 12:29:50,880 - __main__ - DEBUG - Created temporary file: C:\Users\satad\AppData\Local\Temp\tmpzeohsdlm.pdf
+2025-05-15 12:29:50,883 - __main__ - INFO - Saved JD with ID: dfcdfc41-2d48-478b-9d2a-1f7630d2e11f at path: uploads\jd\dfcdfc41-2d48-478b-9d2a-1f7630d2e11f_JD Growth Manager DC.pdf
+2025-05-15 12:29:50,913 - __main__ - DEBUG - Extracted 2 pages of text
